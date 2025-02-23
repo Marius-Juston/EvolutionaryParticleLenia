@@ -35,7 +35,7 @@ class VideoWriter:
         # Compute the delay (in milliseconds) between frames.
         self.delay = int(1000 / fps)
         # Create a named window that can be resized.
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(self.window_name)
 
     def add(self, img) -> bool:
         """
