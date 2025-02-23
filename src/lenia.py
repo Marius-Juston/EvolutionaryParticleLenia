@@ -1,161 +1,151 @@
 from collections import namedtuple
-from collections.abc import Callable
 from functools import partial
 
 import jax
-import jax.numpy as jp
-import numpy as np
-from jax import jit
+import jax.numpy as jnp
+from jax import jit, vmap, grad
 
-from util import cmap_e, vmap2, cmap_ug
-from video import VideoWriter
-
-Params = namedtuple('Params', 'mu_k sigma_k w_k mu_g sigma_g c_rep')
-Fields = namedtuple('Fields', 'U G R E')
+# Define types with frozen=True for immutability
+Params = namedtuple('Params', 'mu_k sigma_k w_k mu_g sigma_g c_rep', defaults=(None,) * 6)
+Fields = namedtuple('Fields', 'U G R E', defaults=(None,) * 4)
 
 
 class ParticleLenia:
     def __init__(self, params: Params, global_optimization=False, dt=0.1, points=None):
         self.dt = dt
-        self._f: Callable[jax.Array, jax.Array] = self.total_motion_f if global_optimization else self.motion_f
-
+        # Pre-compile the motion function based on optimization strategy
+        self._f = jit(self.total_motion_f if global_optimization else self.motion_f)
         self.params = params
 
-        if points:
-            self.points = points
+        if points is not None:
+            self.points = jnp.array(points)
         else:
             key = jax.random.PRNGKey(20)
-            self.points = (jax.random.uniform(key, [200, 2]) - 0.5) * 12.0
+            # Use jnp.array for consistent GPU usage
+            self.points = (jax.random.uniform(key, (200, 2)) - 0.5) * 12.0
 
+    @staticmethod
     @jit
-    def peak_f(self, x: jax.Array, mu: float, sigma: float) -> jax.Array:
-        """
-        The growth function (Gaussian Distribution)
-        :param x:
-        :param mu:
-        :param sigma:
-        :return:
-        """
-        return jp.exp(-((x - mu) / sigma) ** 2)
+    def peak_f(x: jnp.ndarray, mu: float, sigma: float) -> jnp.ndarray:
+        """Vectorized Gaussian distribution computation"""
+        return jnp.exp(-jnp.square((x - mu) / sigma))
 
-    @jit
-    def fields_f(self, points: jax.Array, x: jax.Array) -> Fields:
-        """
-        The big function representing the potential field of the system
-        :param points:
-        :param x:
-        :return:
-        """
-        r = jp.sqrt(jp.square(x - points).sum(-1).clip(1e-10))
-        U = self.peak_f(r, self.params.mu_k, self.params.sigma_k).sum() * self.params.w_k
+    @partial(jit, static_argnums=0)
+    def fields_f(self, points: jnp.ndarray, x: jnp.ndarray) -> Fields:
+        """Compute field potentials using vectorized operations"""
+        # Vectorized distance calculation
+        diff = x - points
+        r = jnp.sqrt(jnp.sum(jnp.square(diff), axis=-1).clip(1e-10))
+
+        # Vectorized field computations
+        U = jnp.sum(self.peak_f(r, self.params.mu_k, self.params.sigma_k)) * self.params.w_k
         G = self.peak_f(U, self.params.mu_g, self.params.sigma_g)
-        R = self.params.c_rep / 2 * ((1.0 - r).clip(0.0) ** 2).sum()
-        return Fields(U, G, R, E=R - G)
+        R = self.params.c_rep * 0.5 * jnp.sum(jnp.square(jnp.clip(1.0 - r, 0.0, None)))
 
-    @jit
-    def motion_f(self, points: jax.Array) -> jax.Array:
-        """
-        Given the energy field take the gradient and then to minimize move to the inverse gradient
-        :return:
-        """
-        grad_E = jax.grad(lambda x: self.fields_f(points, x).E)
-        return -jax.vmap(grad_E)(points)
+        return Fields(U=U, G=G, R=R, E=R - G)
 
-    @jit
-    def odeint_euler(self, x0: jax.Array, n: int) -> jax.Array:
-        """
-        Set Euler integration of the particles
-        :param x0:
-        :param n:
-        :return:
-        """
-        return jax.lax.scan(self.step_f, x0, None, n)[1]
+    @partial(jit, static_argnums=0)
+    def motion_f(self, points: jnp.ndarray) -> jnp.ndarray:
+        """Compute motion vectors using vectorized gradient"""
+        grad_E = grad(lambda x: self.fields_f(points, x).E)
+        return -vmap(grad_E)(points)
 
-    @jit
-    def step_f(self, x: jax.Array, _):
-        x = x + self.dt * self._f(x)
-        return x, x
+    @partial(jit, static_argnums=(0, 2))
+    def odeint_euler(self, x0: jnp.ndarray, n: int) -> jnp.ndarray:
+        """Vectorized Euler integration"""
 
-    @jit
-    def point_fields_f(self, points: jax.Array) -> jax.Array:
-        """
-        Computes the particle wise energy of the system
-        :return:
-        """
-        return jax.vmap(partial(self.fields_f, points))(points)
+        def scan_fn(x, _):
+            next_x = x + self.dt * self._f(x)
+            return next_x, next_x
 
-    @jit
-    def total_energy_f(self, points: jax.Array) -> jax.Array:
-        """
-        The sum total energy in the system
-        :return:
-        """
-        return self.point_fields_f(points).E.sum()
+        return jax.lax.scan(scan_fn, x0, None, n)[1]
 
-    @jit
-    def total_motion_f(self, points: jax.Array) -> jax.Array:
-        """
-        The gradient of the total energy of the system per point (used to minimize in a global sense rather than a local greedy way)
-        :param points:
-        :return:
-        """
-        return -jax.grad(self.total_energy_f)(points)
+    @partial(jit, static_argnums=0)
+    def step_f(self, x: jnp.ndarray, _):
+        """Single integration step"""
+        next_x = x + self.dt * self._f(x)
+        return next_x, next_x
 
-    @partial(jax.jit, static_argnames=['w', 'show_UG', 'show_cmap'])
+    @partial(jit, static_argnums=0)
+    def point_fields_f(self, points: jnp.ndarray) -> jnp.ndarray:
+        """Vectorized computation of per-point fields"""
+        return vmap(partial(self.fields_f, points))(points)
+
+    @partial(jit, static_argnums=0)
+    def total_energy_f(self, points: jnp.ndarray) -> jnp.ndarray:
+        """Compute total system energy"""
+        return jnp.sum(self.point_fields_f(points).E)
+
+    @partial(jit, static_argnums=0)
+    def total_motion_f(self, points: jnp.ndarray) -> jnp.ndarray:
+        """Global optimization using total energy gradient"""
+        return -grad(self.total_energy_f)(points)
+
+    @partial(jit, static_argnums=(0, 3, 4, 5))
     def show_lenia(self, points, extent, w=400, show_UG=False, show_cmap=True):
-        xy = jp.mgrid[-1:1:w * 1j, -1:1:w * 1j].T * extent
+        """Optimized visualization with batched computations"""
+        # Use jnp.meshgrid for consistent GPU usage
+        x, y = jnp.meshgrid(
+            jnp.linspace(-extent, extent, w),
+            jnp.linspace(-extent, extent, w)
+        )
+        xy = jnp.stack([x, y], axis=-1)
+
+        # Vectorized field computations
         e0 = -self.peak_f(0.0, self.params.mu_g, self.params.sigma_g)
-        f = partial(self.fields_f, points)
-        fields = vmap2(f)(xy)
-        r2 = jp.square(xy[..., None, :] - points).sum(-1).min(-1)
-        points_mask = (r2 / 0.02).clip(0, 1.0)[..., None]
+        fields = vmap(lambda pos: self.fields_f(points, pos))(xy.reshape(-1, 2))
+        fields = jax.tree.map(lambda x: x.reshape(w, w), fields)
+
+        # Optimized distance computation
+        r2 = jnp.min(jnp.sum(jnp.square(xy[..., None, :] - points), axis=-1), axis=-1)
+        points_mask = jnp.clip(r2 / 0.02, 0, 1.0)[..., None]
+
+        # Visualization computations
+        from util import cmap_e, cmap_ug  # Import visualization utilities
         vis = cmap_e(fields.E - e0) * points_mask
+
         if show_cmap:
-            e_mean = jax.vmap(f)(points).E.mean()
-            bar = np.r_[0.5:-0.5:w * 1j]
+            e_mean = jnp.mean(vmap(lambda p: self.fields_f(points, p))(points).E)
+            bar = jnp.linspace(0.5, -0.5, w)
             bar = cmap_e(bar) * (1.0 - self.peak_f(bar, e_mean - e0, 0.005)[:, None])
-            vis = jp.hstack([vis, bar[:, None].repeat(16, 1)])
+            vis = jnp.hstack([vis, jnp.repeat(bar[:, None], 16, axis=1)])
+
         if show_UG:
             vis_u = cmap_ug(fields.U, fields.G) * points_mask
             if show_cmap:
-                u = np.r_[1:0:w * 1j]
+                u = jnp.linspace(1, 0, w)
                 bar = cmap_ug(u, self.peak_f(u, self.params.mu_g, self.params.sigma_g))
-                bar = bar[:, None].repeat(16, 1)
-                vis_u = jp.hstack([bar, vis_u])
-            vis = jp.hstack([vis_u, vis])
+                bar = jnp.repeat(bar[:, None], 16, axis=1)
+                vis_u = jnp.hstack([bar, vis_u])
+            vis = jnp.hstack([vis_u, vis])
+
         return vis
 
     def run_lenia(self):
-
+        """Generator for simulation steps"""
+        points = self.points
         while True:
-            self.points = self.step_f(self.points, None)[0]
-            yield self.points
+            points = self.step_f(points, None)[0]
+            yield points
 
-    def animate_lenia(self, rate=10, slow_start=0, w=400, show_UG=True,
-                      vid=None, extent=None) -> None:
+    def animate_lenia(self, w=400, show_UG=True,
+                      vid=None, fps=60):
+        """Animation with optimized computation"""
         if vid is None:
-            vid = VideoWriter(fps=60)
+            from video import VideoWriter
+            vid = VideoWriter(fps=fps)
 
-        i = 0
-
-        points = self.step_f(self.points, None)[0]
+        self.points = self.step_f(self.points, None)[0]
 
         with vid:
-            # for points in  self.run_lenia():
+            i = 0
             while True:
-                if not (i < slow_start or i % rate == 0):
-                    continue
+                extent = jnp.max(jnp.abs(self.points)) * 1.5
 
-                if extent is None:
-                    extent = jp.abs(points).max() * 1.2
+                self.points = self.step_f(self.points, None)[0]
+                img = self.show_lenia(self.points, extent, w=w, show_UG=show_UG)
 
-                points = self.step_f(points, None)[0]
-
-                img = self.show_lenia(points, extent, w=w, show_UG=show_UG)
-
-                res = vid(img)
-
-                if not res:
+                if not vid(img):
                     break
 
                 i += 1
@@ -163,6 +153,6 @@ class ParticleLenia:
 
 if __name__ == '__main__':
     params = Params(mu_k=4.0, sigma_k=1.0, w_k=0.022, mu_g=0.6, sigma_g=0.15, c_rep=1.0)
-    l = ParticleLenia(params, global_optimization=True)
+    l = ParticleLenia(params, global_optimization=False)
 
     l.animate_lenia()
