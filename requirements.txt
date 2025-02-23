@@ -1,0 +1,3 @@
+Pillow
+jax[cuda12]
+matplotlib
