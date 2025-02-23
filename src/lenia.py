@@ -236,7 +236,7 @@ class ParticleLenia:
 
         return vis
 
-    def animate_lenia(self, rate=10, vid=None):
+    def animate_lenia(self, vid=None):
         """Animation with optimized computation"""
         if vid is None:
             from video import VideoWriter
@@ -251,7 +251,7 @@ class ParticleLenia:
 
                 self.points, self.dt = self.step_f(self.points, self.dt)
 
-                if i % rate == 0:
+                if i % self.output_options.rate == 0:
                     img = self.show_lenia(self.points, extent)
 
                     img = convert_to_image(img)
@@ -272,7 +272,7 @@ class ParticleLenia:
 if __name__ == '__main__':
     params = Params(mu_k=4.0, sigma_k=1.0, w_k=0.022, mu_g=0.6, sigma_g=0.15, c_rep=1.0)
     output_options = Output(fps=None)
-    sim_options = SimulationOptions(int_mode=IntegrationMethods.RK45, dt=10, global_optimization=False)
+    sim_options = SimulationOptions(int_mode=IntegrationMethods.EULER, dt=.1, global_optimization=False)
 
     l = ParticleLenia(params, sim_options, output_options)
 
