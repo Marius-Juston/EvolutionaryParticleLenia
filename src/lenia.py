@@ -241,6 +241,9 @@ class ParticleLenia:
                 self.points, self.dt = self.step_f(self.points, self.dt)
                 img = self.show_lenia(self.points, extent)
 
+                if self.sim_options.int_mode == IntegrationMethods.RK45:
+                    img = text_overlay(img, f"dt: {self.dt:.2f}")
+
                 if not vid(img):
                     break
 
