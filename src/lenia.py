@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 from jax import jit, vmap, grad
 
-from util import cmap_e, cmap_ug, text_overlay
+from util import cmap_e, cmap_ug, text_overlay, convert_to_image
 
 # Define types with frozen=True for immutability
 Params = namedtuple('Params', 'mu_k sigma_k w_k mu_g sigma_g c_rep', defaults=(1.0,) * 6)
@@ -20,7 +20,7 @@ class IntegrationMethods(enum.Enum):
     RK45 = 2  # Runge–Kutta 4(5) adaptive timestep
 
 
-Output = namedtuple("Output", "extent_scale w show_UG show_cmap fps", defaults=(1.5, 800, True, True, 60))
+Output = namedtuple("Output", "extent_scale w show_UG show_cmap fps rate", defaults=(1.5, 800, True, True, 60, 10))
 
 SimulationOptions = namedtuple("Simulation", "int_mode dt global_optimization ",
                                defaults=(IntegrationMethods.EULER, 0.1, False))
@@ -236,7 +236,7 @@ class ParticleLenia:
 
         return vis
 
-    def animate_lenia(self, vid=None):
+    def animate_lenia(self, rate=10, vid=None):
         """Animation with optimized computation"""
         if vid is None:
             from video import VideoWriter
@@ -250,25 +250,29 @@ class ParticleLenia:
                 extent = jnp.max(jnp.abs(self.points)) * self.output_options.extent_scale
 
                 self.points, self.dt = self.step_f(self.points, self.dt)
-                img = self.show_lenia(self.points, extent)
 
-                if self.sim_options.int_mode == IntegrationMethods.RK45:
-                    img = text_overlay(img, f"FPS: {fps:.0f}, dt: {self.dt:.2f}")
-                else:
-                    img = text_overlay(img, f"FPS: {fps:.0f}")
+                if i % rate == 0:
+                    img = self.show_lenia(self.points, extent)
 
-                if not vid(img):
-                    break
+                    img = convert_to_image(img)
 
-                fps = 1.0 / (time.time() - start_time)
+                    if self.sim_options.int_mode == IntegrationMethods.RK45:
+                        img = text_overlay(img, f"FPS: {fps:.0f}, dt: {self.dt:.2f}")
+                    else:
+                        img = text_overlay(img, f"FPS: {fps:.0f}")
+
+                    if not vid(img):
+                        break
+
+                    fps = 1.0 / (time.time() - start_time)
 
                 i += 1
 
 
 if __name__ == '__main__':
     params = Params(mu_k=4.0, sigma_k=1.0, w_k=0.022, mu_g=0.6, sigma_g=0.15, c_rep=1.0)
-    output_options = Output(fps=1000)
-    sim_options = SimulationOptions(int_mode=IntegrationMethods.RK45, dt=10)
+    output_options = Output(fps=None)
+    sim_options = SimulationOptions(int_mode=IntegrationMethods.RK45, dt=10, global_optimization=False)
 
     l = ParticleLenia(params, sim_options, output_options)
 

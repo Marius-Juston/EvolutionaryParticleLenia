@@ -32,23 +32,26 @@ def cmap_ug(u, g):
     return lerp(g[..., None], vis, [1.17, 0.91, 0.13])
 
 
-def text_overlay(img: jnp.ndarray, text: str, pos=(20, 30), color=(255, 255, 255)):
+def text_overlay(img: np.array, text: str, pos=(20, 30), color=(255, 255, 255)):
     """
     Optimized function to overlay text on a JAX image.
     It performs a single device-to-host transfer (if needed), converts the image
     to uint8 with one call to cv2.convertScaleAbs, and does color conversion only if necessary.
     """
-    # Bring the JAX DeviceArray to host memory as a numpy array.
-    # Using jax.device_get is explicit and can be faster than np.asarray if the array lives on GPU.
-    img_np = jax.device_get(img)
-
-    # If the image is floating point (and assumed to be in [0,1]), convert it to 8-bit.
-    # cv2.convertScaleAbs is optimized in C++.
-    if img_np.dtype != np.uint8:
-        img_np = cv2.convertScaleAbs(img_np, alpha=255)
-
-    # Put the overlay text on the image.
-    # OpenCV's putText is very fast (written in C/C++).
-    cv2.putText(img_np, text, pos, cv2.FONT_HERSHEY_SIMPLEX,
+    cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX,
                 fontScale=1, color=color, thickness=2, lineType=cv2.LINE_AA)
-    return img_np
+    return img
+
+
+# a CPU, uint8, BGR image. For example, if your simulation originally outputs a JAX array in [0, 1] RGB,
+# you can convert it once as follows:
+def convert_to_image(img: jnp.ndarray):
+    # Transfer from device to host (once per frame) and scale/clip.
+    img_cpu = jax.device_get(img)
+    if img_cpu.dtype != np.uint8:
+        # Convert from float [0,1] to uint8 and clip, then convert from RGB to BGR.
+        img_cpu = cv2.convertScaleAbs(img_cpu, alpha=255)
+
+    img_cpu = cv2.cvtColor(img_cpu, cv2.COLOR_RGB2BGR)
+
+    return img_cpu
