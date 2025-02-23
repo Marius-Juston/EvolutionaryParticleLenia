@@ -1,17 +1,8 @@
-import PIL
-import PIL.ImageDraw
-import PIL.ImageFont
+import cv2
 import jax
+import jax.numpy as jnp
 import jax.numpy as jp
-import matplotlib.pyplot as plt
 import numpy as np
-from PIL.Image import Image
-
-
-def np2pil(a):
-    if a.dtype in [np.float32, np.float64]:
-        a = np.uint8(np.clip(a, 0, 1) * 255)
-    return PIL.Image.fromarray(a)
 
 
 # JAX utils
@@ -41,11 +32,23 @@ def cmap_ug(u, g):
     return lerp(g[..., None], vis, [1.17, 0.91, 0.13])
 
 
-fontpath = plt.matplotlib.get_data_path() + '/fonts/ttf/DejaVuSansMono.ttf'
-pil_font = PIL.ImageFont.truetype(fontpath, size=16)
+def text_overlay(img: jnp.ndarray, text: str, pos=(20, 30), color=(255, 255, 255)):
+    """
+    Optimized function to overlay text on a JAX image.
+    It performs a single device-to-host transfer (if needed), converts the image
+    to uint8 with one call to cv2.convertScaleAbs, and does color conversion only if necessary.
+    """
+    # Bring the JAX DeviceArray to host memory as a numpy array.
+    # Using jax.device_get is explicit and can be faster than np.asarray if the array lives on GPU.
+    img_np = jax.device_get(img)
 
-def text_overlay(img, text, pos=(20, 10), color=(255, 255, 255)):
-    img = np2pil(img)
-    draw = PIL.ImageDraw.Draw(img)
-    draw.text(pos, text, fill=color, font=pil_font)
-    return img
+    # If the image is floating point (and assumed to be in [0,1]), convert it to 8-bit.
+    # cv2.convertScaleAbs is optimized in C++.
+    if img_np.dtype != np.uint8:
+        img_np = cv2.convertScaleAbs(img_np, alpha=255)
+
+    # Put the overlay text on the image.
+    # OpenCV's putText is very fast (written in C/C++).
+    cv2.putText(img_np, text, pos, cv2.FONT_HERSHEY_SIMPLEX,
+                fontScale=1, color=color, thickness=2, lineType=cv2.LINE_AA)
+    return img_np

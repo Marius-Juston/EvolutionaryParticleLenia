@@ -1,4 +1,5 @@
 import enum
+import time
 from collections import namedtuple
 from functools import partial
 
@@ -24,23 +25,23 @@ Output = namedtuple("Output", "extent_scale w show_UG show_cmap fps", defaults=(
 SimulationOptions = namedtuple("Simulation", "int_mode dt global_optimization ",
                                defaults=(IntegrationMethods.EULER, 0.1, False))
 
-
 # Precompute RK45 constants (ideally defined once at module load)
-RK45_B    = jnp.array([
+RK45_B = jnp.array([
     [0., 0., 0., 0., 0.],
-    [1/4, 0., 0., 0., 0.],
-    [3/32, 9/32, 0., 0., 0.],
-    [1932/2197, -7200/2197, 7296/2197, 0., 0.],
-    [439/216, -8., 3680/513, -845/4104, 0.],
-    [-8/27, 2., -3544/2565, 1859/4104, -11/40]
+    [1 / 4, 0., 0., 0., 0.],
+    [3 / 32, 9 / 32, 0., 0., 0.],
+    [1932 / 2197, -7200 / 2197, 7296 / 2197, 0., 0.],
+    [439 / 216, -8., 3680 / 513, -845 / 4104, 0.],
+    [-8 / 27, 2., -3544 / 2565, 1859 / 4104, -11 / 40]
 ])
-RK45_C5   = jnp.array([16/135, 0., 6656/12825, 28561/56430, -9/50, 2/55])
-RK45_C4   = jnp.array([25/216, 0., 1408/2565, 2197/4104, -1/5, 0.])
+RK45_C5 = jnp.array([16 / 135, 0., 6656 / 12825, 28561 / 56430, -9 / 50, 2 / 55])
+RK45_C4 = jnp.array([25 / 216, 0., 1408 / 2565, 2197 / 4104, -1 / 5, 0.])
 
 # Pad the Butcher tableau to fixed shape (6,6)
 RK45_B_PAD = jnp.pad(RK45_B, ((0, 0), (0, 1)))  # shape (6,6)
 # Precompute a lower triangular mask where element (i,j)=1 if j < i, else 0.
-RK45_MASK = jnp.tril(jnp.ones((6,6), dtype=RK45_B.dtype), -1)
+RK45_MASK = jnp.tril(jnp.ones((6, 6), dtype=RK45_B.dtype), -1)
+
 
 class ParticleLenia:
     def __init__(self, params: Params, sim_options: SimulationOptions, output: Output, points=None):
@@ -242,25 +243,31 @@ class ParticleLenia:
             vid = VideoWriter(fps=self.output_options.fps)
 
         with vid:
+            fps = 0
             i = 0
             while True:
+                start_time = time.time()
                 extent = jnp.max(jnp.abs(self.points)) * self.output_options.extent_scale
 
                 self.points, self.dt = self.step_f(self.points, self.dt)
                 img = self.show_lenia(self.points, extent)
 
                 if self.sim_options.int_mode == IntegrationMethods.RK45:
-                    img = text_overlay(img, f"dt: {self.dt:.2f}")
+                    img = text_overlay(img, f"FPS: {fps:.0f}, dt: {self.dt:.2f}")
+                else:
+                    img = text_overlay(img, f"FPS: {fps:.0f}")
 
                 if not vid(img):
                     break
+
+                fps = 1.0 / (time.time() - start_time)
 
                 i += 1
 
 
 if __name__ == '__main__':
     params = Params(mu_k=4.0, sigma_k=1.0, w_k=0.022, mu_g=0.6, sigma_g=0.15, c_rep=1.0)
-    output_options = Output()
+    output_options = Output(fps=1000)
     sim_options = SimulationOptions(int_mode=IntegrationMethods.RK45, dt=10)
 
     l = ParticleLenia(params, sim_options, output_options)
