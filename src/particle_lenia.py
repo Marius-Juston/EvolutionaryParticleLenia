@@ -103,18 +103,6 @@ def total_energy_f(params, points):
 def total_motion_f(params, points):
     return -jax.grad(partial(total_energy_f, params))(points)
 
-@jit
-def calc_K_weight(mu, sigma, dim_n):
-    r = jp.linspace(max(mu - sigma * 4, 0.0), mu + sigma * 4, 51)
-    y = peak_f(r, mu, sigma) * r ** (dim_n - 1)
-    s = jp.trapezoid(y, r) * {2: 2, 3: 4}[dim_n] * jp.pi
-    return 1.0 / s
-
-
-def create_params(m_k, s_k, m_g, s_g, rep, dim_n):
-    w_k = calc_K_weight(m_k, s_k, dim_n)
-    return Params(m_k, s_k, w_k, m_g, s_g, rep)
-
 
 def test():
     params = Params(mu_k=4.0, sigma_k=1.0, w_k=0.022, mu_g=0.6, sigma_g=0.15, c_rep=1.0)
@@ -123,7 +111,7 @@ def test():
     dt = 0.1
 
     rotor_story = odeint_euler(motion_f, params, points0, dt, 10000)
-    animate_lenia(params, rotor_story)
+    animate_lenia(params, rotor_story, w=800)
 
     energy_log = jax.lax.map(partial(total_energy_f, params), rotor_story)
     plt.figure(figsize=(8, 4))
