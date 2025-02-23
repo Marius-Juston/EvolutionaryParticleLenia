@@ -6,6 +6,8 @@ import jax
 import jax.numpy as jnp
 from jax import jit, vmap, grad
 
+from util import cmap_e, cmap_ug, text_overlay
+
 # Define types with frozen=True for immutability
 Params = namedtuple('Params', 'mu_k sigma_k w_k mu_g sigma_g c_rep', defaults=(1.0,) * 6)
 Fields = namedtuple('Fields', 'U G R E', defaults=(None,) * 4)
@@ -206,7 +208,6 @@ class ParticleLenia:
         points_mask = jnp.clip(r2 / 0.02, 0, 1.0)[..., None]
 
         # Visualization computations
-        from util import cmap_e, cmap_ug  # Import visualization utilities
         vis = cmap_e(fields.E - e0) * points_mask
 
         if self.output_options.show_cmap:
