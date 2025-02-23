@@ -25,6 +25,23 @@ SimulationOptions = namedtuple("Simulation", "int_mode dt global_optimization ",
                                defaults=(IntegrationMethods.EULER, 0.1, False))
 
 
+# Precompute RK45 constants (ideally defined once at module load)
+RK45_B    = jnp.array([
+    [0., 0., 0., 0., 0.],
+    [1/4, 0., 0., 0., 0.],
+    [3/32, 9/32, 0., 0., 0.],
+    [1932/2197, -7200/2197, 7296/2197, 0., 0.],
+    [439/216, -8., 3680/513, -845/4104, 0.],
+    [-8/27, 2., -3544/2565, 1859/4104, -11/40]
+])
+RK45_C5   = jnp.array([16/135, 0., 6656/12825, 28561/56430, -9/50, 2/55])
+RK45_C4   = jnp.array([25/216, 0., 1408/2565, 2197/4104, -1/5, 0.])
+
+# Pad the Butcher tableau to fixed shape (6,6)
+RK45_B_PAD = jnp.pad(RK45_B, ((0, 0), (0, 1)))  # shape (6,6)
+# Precompute a lower triangular mask where element (i,j)=1 if j < i, else 0.
+RK45_MASK = jnp.tril(jnp.ones((6,6), dtype=RK45_B.dtype), -1)
+
 class ParticleLenia:
     def __init__(self, params: Params, sim_options: SimulationOptions, output: Output, points=None):
         int_funcs = {
@@ -114,59 +131,50 @@ class ParticleLenia:
 
         return next_x, dt
 
-    @partial(jit, static_argnums=0)
+    @partial(jax.jit, static_argnums=0)
     def step_f_rk45(self, x: jnp.ndarray, dt: float) -> tuple[jnp.ndarray, float]:
         """
-        JAX-compatible adaptive Runge-Kutta-Fehlberg (RKF45) integration step.
-        Takes and returns both state and dt as a tuple to maintain functional purity.
+        Highly optimized JAX-compatible adaptive Runge-Kutta-Fehlberg (RKF45) integration step.
+
+        This implementation precomputes the RK45 coefficients and employs:
+          - A padded Butcher tableau (RK45_B_PAD) with a static lower-triangular mask (RK45_MASK) to avoid dynamic slicing.
+          - jax.lax.fori_loop for efficient, compiled iteration over the 6 stages.
+
+        The routine computes both 5th order (x5) and 4th order (x4) estimates to determine an error
+        for adaptive timestep adjustment.
         """
+        # Tolerance and timestep bounds (could be parameters if needed)
+        tol, min_dt, max_dt = 1e-6, 1e-6, 1.0
 
-        # RK45 coefficients
-        a = jnp.array([0., 1 / 4, 3 / 8, 12 / 13, 1., 1 / 2])
+        # Evaluate the derivative at the initial state x
+        k0 = self._f(x)
+        k = jnp.zeros((6, *k0.shape), dtype=x.dtype)
+        k = k.at[0].set(k0)
 
-        # Butcher tableau
-        b = jnp.array([
-            [0., 0., 0., 0., 0.],
-            [1 / 4, 0., 0., 0., 0.],
-            [3 / 32, 9 / 32, 0., 0., 0.],
-            [1932 / 2197, -7200 / 2197, 7296 / 2197, 0., 0.],
-            [439 / 216, -8., 3680 / 513, -845 / 4104, 0.],
-            [-8 / 27, 2., -3544 / 2565, 1859 / 4104, -11 / 40]
-        ])
+        def body(i, k):
+            # Compute the weighted sum for the i-th stage:
+            #   weighted_sum = dt * sum_{j=0}^{i-1} (b[i,j] * k[j])
+            # Instead of dynamic slicing, use the fixed row RK45_B_PAD[i,:] and mask it with RK45_MASK[i,:].
+            weighted_sum = dt * jnp.tensordot(RK45_B_PAD[i, :] * RK45_MASK[i, :], k, axes=([0], [0]))
+            # Compute the intermediate state x_i using the weighted sum
+            x_i = x + weighted_sum
+            # Evaluate the derivative at x_i
+            k_i = self._f(x_i)
+            return k.at[i].set(k_i)
 
-        # Coefficients for 5th order solution
-        c5 = jnp.array([16 / 135, 0., 6656 / 12825, 28561 / 56430, -9 / 50, 2 / 55])
+        # Loop over stages 1 to 5 using a compiled loop.
+        k = jax.lax.fori_loop(1, 6, body, k)
 
-        # Coefficients for 4th order solution
-        c4 = jnp.array([25 / 216, 0., 1408 / 2565, 2197 / 4104, -1 / 5, 0.])
-
-        # Error tolerance
-        tol = 1e-6
-        min_dt = 1e-6
-        max_dt = 1.0
-
-        # Compute k values
-        k1 = self._f(x)
-        k = jnp.zeros((6, *k1.shape))
-        k = k.at[0].set(k1)
-
-        # Compute remaining k values
-        for i in range(1, 6):
-            xi = x + dt * sum(b[i, j] * k[j] for j in range(i))
-            k = k.at[i].set(self._f(xi))
-
-        # Compute solutions
-        x5 = x + dt * sum(c5[i] * k[i] for i in range(6))  # 5th order solution
-        x4 = x + dt * sum(c4[i] * k[i] for i in range(6))  # 4th order solution
-
-        # Error estimate
+        # Compute the 5th order solution (x5) and 4th order solution (x4)
+        x5 = x + dt * jnp.tensordot(RK45_C5, k, axes=1)
+        x4 = x + dt * jnp.tensordot(RK45_C4, k, axes=1)
         error = jnp.max(jnp.abs(x5 - x4))
 
-        # Compute new timestep
+        # Compute the new timestep based on the error estimate; the exponent 0.2 reflects the 5th order accuracy.
         dt_factor = jnp.power(tol / (error + 1e-10), 0.2)
         dt_new = jnp.clip(0.9 * dt * dt_factor, min_dt, max_dt)
 
-        # Accept or reject step based on error
+        # Accept the new state if the error is within tolerance; otherwise, reject and reduce dt.
         accept = error <= tol
         next_x = jnp.where(accept, x5, x)
         next_dt = jnp.where(accept, dt_new, dt * 0.5)
