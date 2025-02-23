@@ -1,3 +1,4 @@
 Pillow
 jax[cuda12]
 matplotlib
+opencv-python
