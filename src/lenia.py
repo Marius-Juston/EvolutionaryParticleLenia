@@ -23,8 +23,8 @@ class IntegrationMethods(enum.Enum):
 
 Output = namedtuple("Output", "extent_scale w show_UG show_cmap fps rate", defaults=(1.5, 800, True, True, 60, 10))
 
-SimulationOptions = namedtuple("Simulation", "int_mode dt global_optimization ",
-                               defaults=(IntegrationMethods.EULER, 0.1, False))
+SimulationOptions = namedtuple("Simulation", "int_mode dt global_optimization n_particles",
+                               defaults=(IntegrationMethods.EULER, 0.1, False, 200))
 
 # Precompute RK45 constants (ideally defined once at module load)
 RK45_B = jnp.array([
@@ -199,12 +199,12 @@ class ParticleLenia:
         return -grad(self.total_energy_f)(points)
 
     @partial(jit, static_argnums=0)
-    def show_lenia(self, points, extent):
+    def show_lenia(self, points : jnp.ndarray, extent: jnp.ndarray, mids: jnp.ndarray):
         """Optimized visualization with batched computations"""
         # Use jnp.meshgrid for consistent GPU usage
         x, y = jnp.meshgrid(
-            jnp.linspace(-extent, extent, self.output_options.w),
-            jnp.linspace(-extent, extent, self.output_options.w)
+            jnp.linspace(-extent + mids[0], extent + mids[0], self.output_options.w),
+            jnp.linspace(-extent + mids[1], extent + mids[1], self.output_options.w)
         )
         xy = jnp.stack([x, y], axis=-1)
 
@@ -305,10 +305,13 @@ class ParticleLenia:
                 self.points, self.dt = self.step_f(self.points, self.dt)
 
                 if i % self.output_options.rate == 0:
-                    extent = jnp.max(jnp.abs(self.points)) * self.output_options.extent_scale
-                    print(extent)
+                    extent_max = jnp.max(self.points, axis=0)
+                    extent_min = jnp.min(self.points, axis=0)
+                    extent = jnp.min(extent_max - extent_min) / 2 * self.output_options.extent_scale
 
-                    img = self.show_lenia(self.points, extent)
+                    mids = (extent_max + extent_min) / 2.0
+
+                    img = self.show_lenia(self.points, extent, mids)
 
                     img = convert_to_image(img)
 
