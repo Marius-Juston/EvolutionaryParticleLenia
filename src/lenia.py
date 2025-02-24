@@ -3,6 +3,7 @@ import time
 from collections import namedtuple
 from functools import partial
 
+import cv2
 import jax
 import jax.numpy as jnp
 from jax import jit, vmap, grad
@@ -236,6 +237,59 @@ class ParticleLenia:
 
         return vis
 
+    def add_scale_bar(self, img, extent, bar_fraction=0.2, margin=10, bar_height=5, color=(255, 255, 255)):
+        """
+        Draws a scale bar on the provided image.
+
+        Parameters:
+          img: NumPy array representing the image (assumed to be in BGR or RGB format).
+          extent: The current extent value such that the simulation covers [-extent, extent] in each axis.
+                  Thus, the total physical width is 2*extent.
+          bar_fraction: Fraction of the physical width to display as the scale bar (default 0.2).
+          margin: Margin in pixels from the image edge (default 10).
+          bar_height: Thickness in pixels of the scale bar (default 5).
+
+        Returns:
+          The image with a scale bar (with tick marks and a label) drawn.
+        """
+        physical_width = 2 * extent  # Total physical distance represented across the image
+        unit_per_pixels = physical_width / self.output_options.w
+
+        # Determine the physical length for the scale bar.
+        scale_length_pixels = self.output_options.w * bar_fraction
+        scale_length = unit_per_pixels * scale_length_pixels
+        scale_length_pixels = int(scale_length_pixels)
+
+        # Define the bottom-right location for the bar.
+        x_end = self.output_options.w - margin
+        x_start = x_end - scale_length_pixels
+        y_end = self.output_options.w - margin
+        y_start = y_end - bar_height
+
+        # Draw a filled white rectangle as the scale bar.
+        cv2.rectangle(img, (x_start, y_start), (x_end, y_end), color=color, thickness=-1)
+
+        # Draw tick marks at the left, middle, and right of the scale bar.
+        tick_thickness = 2
+        tick_height = 10  # height of tick marks (in pixels)
+        tick_positions = [x_start, (x_start + x_end) // 2, x_end]
+        for x_tick in tick_positions:
+            cv2.line(img, (x_tick, y_start), (x_tick, y_start - tick_height), color=color,
+                     thickness=tick_thickness)
+
+        # Add text to indicate the scale. For example: "0.50 units"
+        text = f"{scale_length:.2f} units"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+        text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
+        text_x = x_start + (scale_length_pixels - text_size[0]) // 2
+        text_y = y_start - tick_height - 5  # position text above the tick marks
+        cv2.putText(img, text, (text_x, text_y), font, font_scale, color, thickness, cv2.LINE_AA)
+
+        return img
+
+
     def animate_lenia(self, vid=None):
         """Animation with optimized computation"""
         if vid is None:
@@ -247,14 +301,20 @@ class ParticleLenia:
             i = 0
             while True:
                 start_time = time.time()
-                extent = jnp.max(jnp.abs(self.points)) * self.output_options.extent_scale
 
                 self.points, self.dt = self.step_f(self.points, self.dt)
 
                 if i % self.output_options.rate == 0:
+                    extent = jnp.max(jnp.abs(self.points)) * self.output_options.extent_scale
+                    print(extent)
+
                     img = self.show_lenia(self.points, extent)
 
                     img = convert_to_image(img)
+
+                    # Add the scale bar based on the current extent.
+                    # The image represents [-extent, extent] so the full physical width is 2*extent.
+                    img = self.add_scale_bar(img, extent)
 
                     if self.sim_options.int_mode == IntegrationMethods.RK45:
                         img = text_overlay(img, f"FPS: {fps:.0f}, dt: {self.dt:.2f}")
